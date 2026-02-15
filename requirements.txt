@@ -1,0 +1,55 @@
+# FastAPI
+fastapi
+uvicorn[standard]
+python-multipart
+
+# Database
+sqlalchemy
+alembic
+psycopg2-binary
+
+# Auth & Security
+python-jose[cryptography]
+passlib[bcrypt]
+pydantic[email]
+pydantic-settings
+
+# Google OAuth
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+
+# AI Services
+openai
+google-generativeai
+deepgram-sdk
+elevenlabs
+
+# Storage
+boto3
+supabase
+
+# Caching
+redis
+
+# Email
+python-dotenv
+emails
+
+# Utilities
+httpx
+python-dateutil
+
+# Audio Processing
+pydub
+librosa
+
+# Testing
+pytest
+pytest-asyncio
+pytest-cov
+
+# Development
+black
+flake8
+mypy

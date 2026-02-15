@@ -1,0 +1,23 @@
+# Core FastAPI
+fastapi
+uvicorn[standard]
+python-multipart
+
+# Database
+sqlalchemy
+alembic
+psycopg2-binary
+
+# Auth & Security
+python-jose[cryptography]
+passlib[bcrypt]
+pydantic[email]
+pydantic-settings
+
+# Google OAuth
+google-auth
+google-auth-oauthlib
+
+# Utilities
+python-dotenv
+httpx
