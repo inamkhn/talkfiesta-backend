@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, DateTime, Enum as SQLEnum, Boolean
+from sqlalchemy import Column, String, Integer, DateTime, Enum as SQLEnum, Boolean, ForeignKey
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
@@ -62,7 +62,7 @@ class RefreshToken(Base):
     __tablename__ = "refresh_tokens"
     
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False, index=True)
+    user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     token = Column(String, unique=True, nullable=False, index=True)
     expires_at = Column(DateTime, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

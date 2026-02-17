@@ -356,3 +356,158 @@ class AuthService:
         
         self.db.add(refresh_token)
         self.db.commit()
+
+    # ============================================
+    # GOOGLE OAUTH AUTHENTICATION
+    # ============================================
+    
+    def authenticate_google_user(self, google_user_info: dict) -> Tuple[User, str, str]:
+        """
+        Authenticate or create user from Google OAuth
+        Returns: (user, access_token, refresh_token)
+        """
+        google_id = google_user_info["google_id"]
+        email = google_user_info["email"]
+        
+        # Try to find user by Google ID first
+        user = self.db.query(User).filter(User.google_id == google_id).first()
+        
+        if user:
+            # User exists with this Google ID - login
+            if not user.is_active:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Account is inactive. Please contact support."
+                )
+            
+            # Update last active and avatar if changed
+            user.last_active_at = datetime.utcnow()
+            if google_user_info.get("avatar_url"):
+                user.avatar_url = google_user_info["avatar_url"]
+            self.db.commit()
+            
+        else:
+            # Check if user exists with this email (email/password account)
+            user = self.db.query(User).filter(User.email == email).first()
+            
+            if user:
+                # User exists with email/password - link Google account
+                if user.google_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="This email is already linked to another Google account"
+                    )
+                
+                # Link Google account to existing user
+                user.google_id = google_id
+                user.is_email_verified = True  # Google emails are verified
+                user.last_active_at = datetime.utcnow()
+                if google_user_info.get("avatar_url") and not user.avatar_url:
+                    user.avatar_url = google_user_info["avatar_url"]
+                self.db.commit()
+                
+            else:
+                # Create new user from Google account
+                user = User(
+                    id=str(uuid.uuid4()),
+                    email=email,
+                    name=google_user_info.get("name", email.split("@")[0]),
+                    google_id=google_id,
+                    avatar_url=google_user_info.get("avatar_url"),
+                    password_hash=None,  # No password for OAuth users
+                    role=UserRole.USER,
+                    english_level=EnglishLevel.B1,
+                    primary_goal=PrimaryGoal.FLUENCY,
+                    is_active=True,
+                    is_email_verified=True,  # Google emails are verified
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow(),
+                    last_active_at=datetime.utcnow()
+                )
+                
+                self.db.add(user)
+                self.db.commit()
+                self.db.refresh(user)
+        
+        # Generate tokens
+        access_token = create_access_token(data={"sub": user.id})
+        refresh_token_str = create_refresh_token(data={"sub": user.id})
+        
+        # Save refresh token
+        self._save_refresh_token(user.id, refresh_token_str)
+        
+        return user, access_token, refresh_token_str
+    
+    def link_google_account(self, user_id: str, google_user_info: dict) -> User:
+        """
+        Link Google account to existing user
+        """
+        user = self.db.query(User).filter(User.id == user_id).first()
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        if user.google_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Google account already linked"
+            )
+        
+        google_id = google_user_info["google_id"]
+        
+        # Check if this Google ID is already used by another user
+        existing_google_user = self.db.query(User).filter(User.google_id == google_id).first()
+        if existing_google_user:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This Google account is already linked to another user"
+            )
+        
+        # Link Google account
+        user.google_id = google_id
+        user.is_email_verified = True
+        user.updated_at = datetime.utcnow()
+        if google_user_info.get("avatar_url") and not user.avatar_url:
+            user.avatar_url = google_user_info["avatar_url"]
+        
+        self.db.commit()
+        self.db.refresh(user)
+        
+        return user
+    
+    def unlink_google_account(self, user_id: str) -> User:
+        """
+        Unlink Google account from user
+        """
+        user = self.db.query(User).filter(User.id == user_id).first()
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        if not user.google_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No Google account linked"
+            )
+        
+        # Check if user has a password (can't unlink if it's the only auth method)
+        if not user.password_hash:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot unlink Google account. Please set a password first."
+            )
+        
+        # Unlink Google account
+        user.google_id = None
+        user.updated_at = datetime.utcnow()
+        
+        self.db.commit()
+        self.db.refresh(user)
+        
+        return user

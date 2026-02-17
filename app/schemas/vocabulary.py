@@ -2,6 +2,7 @@ from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
 from enum import Enum
+import json
 
 class PartOfSpeech(str, Enum):
     NOUN = "NOUN"
@@ -58,6 +59,32 @@ class VocabularyWordResponse(BaseModel):
     antonyms: list[str]
     usage_tips: Optional[str] = None
     category: str
+
+    @classmethod
+    def from_orm(cls, obj):
+        """Handle JSON field parsing"""
+        from app.services.vocabulary_service import VocabularyService
+        from sqlalchemy.orm import Session
+        from app.db.session import SessionLocal
+        
+        # Create a dict from the object
+        data = {
+            "id": str(obj.id),
+            "word": obj.word,
+            "definition": obj.definition,
+            "part_of_speech": obj.part_of_speech,
+            "difficulty_level": obj.difficulty_level,
+            "cefr_level": obj.cefr_level,
+            "cycle_number": obj.cycle_number,
+            "pronunciation_ipa": obj.pronunciation_ipa,
+            "pronunciation_audio_url": obj.pronunciation_audio_url,
+            "example_sentences": obj.example_sentences if isinstance(obj.example_sentences, list) else json.loads(obj.example_sentences),
+            "synonyms": obj.synonyms if isinstance(obj.synonyms, list) else json.loads(obj.synonyms),
+            "antonyms": obj.antonyms if isinstance(obj.antonyms, list) else json.loads(obj.antonyms),
+            "usage_tips": obj.usage_tips,
+            "category": obj.category
+        }
+        return cls(**data)
 
     class Config:
         from_attributes = True

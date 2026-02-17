@@ -15,8 +15,28 @@ app = FastAPI(
             "description": "User authentication and authorization endpoints"
         },
         {
+            "name": "Google OAuth",
+            "description": "Google OAuth authentication endpoints"
+        },
+        {
+            "name": "User Profile",
+            "description": "User profile management endpoints"
+        },
+        {
+            "name": "User Plans",
+            "description": "Learning plans and daily activities management"
+        },
+        {
+            "name": "Progress & Analytics",
+            "description": "Progress tracking and dashboard analytics"
+        },
+        {
+            "name": "Speaking Module",
+            "description": "Speaking exercises and submissions"
+        },
+        {
             "name": "Users",
-            "description": "User profile management"
+            "description": "User management (admin)"
         }
     ]
 )

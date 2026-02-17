@@ -11,6 +11,7 @@ psycopg2-binary
 # Auth & Security
 python-jose[cryptography]
 passlib[bcrypt]
+bcrypt<4.2.0
 pydantic[email]
 pydantic-settings
 
