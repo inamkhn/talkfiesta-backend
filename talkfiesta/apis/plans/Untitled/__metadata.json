@@ -1,0 +1,9 @@
+{
+  "type": "api",
+  "entryType": "http",
+  "id": "a9118ec9-b7be-46f1-9464-2be78f2dc868",
+  "rank": "",
+  "url": "https://backend.requestly.com/echo",
+  "method": "GET",
+  "contentType": "none"
+}
