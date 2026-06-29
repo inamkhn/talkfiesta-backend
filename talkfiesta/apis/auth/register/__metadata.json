@@ -1,9 +1,0 @@
-{
-  "type": "api",
-  "entryType": "http",
-  "id": "ccbd7a2e-401f-4f64-b21b-713c8853544d",
-  "rank": "",
-  "url": "http://127.0.0.1:8000/api/v1/auth/register",
-  "method": "POST",
-  "contentType": "none"
-}

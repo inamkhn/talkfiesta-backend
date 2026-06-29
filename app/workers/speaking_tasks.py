@@ -16,9 +16,8 @@ from celery.exceptions import SoftTimeLimitExceeded
 
 from app.workers.celery_app import celery_app
 from app.db.session import SessionLocal
-from app.models.speaking import SpeakingJob, SpeakingSubmission
+from app.models.speaking import SpeakingExercise, SpeakingJob, SpeakingSubmission
 from app.models.user import User
-from app.models.plan import UserPlan
 from app.services.s3_service import get_audio_bytes
 from app.services.ai_service import analyse_speaking
 
@@ -168,33 +167,11 @@ def process_audio_submission(self: Task, job_id: str) -> dict:
                 .filter(SpeakingExercise.id == submission.exercise_id)
                 .first()
             )
-            plan = db.query(UserPlan).filter(
-                UserPlan.id == user.active_plan_id
-            ).first()
-            if (
-                exercise
-                and exercise.user_id == user.id
-                and exercise.day == user.current_day
-                and plan
-                and exercise.cycle == plan.cycle_number
-            ):
-                from app.models.plan import DailyProgress
-                day_prog = (
-                    db.query(DailyProgress)
-                    .filter(
-                        DailyProgress.plan_id == user.active_plan_id,
-                        DailyProgress.day_number == user.current_day,
-                    )
-                    .first()
+            if exercise and exercise.user_id == user.id:
+                from app.services.progress_service import mark_activity_complete
+                mark_activity_complete(
+                    db, user, "speaking", exercise.cycle, exercise.day
                 )
-                if day_prog and not day_prog.speaking_done:
-                    day_prog.speaking_done = True
-                    day_prog.activities_completed = (
-                        day_prog.activities_completed or 0
-                    ) + 1
-                    db.commit()
-                    from app.services.progress_service import advance_day_if_complete
-                    advance_day_if_complete(db, user)
 
         logger.info(
             f"[Task] Job {job_id} completed — "

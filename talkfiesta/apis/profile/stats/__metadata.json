@@ -1,9 +1,0 @@
-{
-  "type": "api",
-  "entryType": "http",
-  "id": "4489a51c-71bb-4731-832d-6215d70446af",
-  "rank": "",
-  "url": "http://127.0.0.1:8000/api/v1/profile/me/stats",
-  "method": "GET",
-  "contentType": "none"
-}

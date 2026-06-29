@@ -61,6 +61,7 @@ class VocabularySRS(Base):
     repetitions = Column(Integer, default=0)
     mastery_level = Column(Integer, default=0)
     review_count = Column(Integer, default=0)
+    lapse_count = Column(Integer, default=0)  # Times user forgot (grade < 3)
     next_review_date = Column(Date, nullable=True)
     last_reviewed = Column(Date)
     is_mastered = Column(Boolean, default=False)

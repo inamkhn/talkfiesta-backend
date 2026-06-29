@@ -9,7 +9,6 @@ from google.genai import types
 
 from app.config import settings
 from app.models.user import User
-from app.models.plan import UserPlan
 from app.models.writing import WritingPrompt, WritingSubmission
 from app.schemas.writing import WritingSubmitRequest
 
@@ -127,32 +126,11 @@ def grade_and_save_submission(db: Session, current_user: User, payload: WritingS
         db.commit()
 
     # --- Day-completion tracking ---
-    if (
-        prompt.user_id == current_user.id
-        and prompt.day == current_user.current_day
-        and current_user.active_plan_id
-    ):
-        plan = db.query(UserPlan).filter(
-            UserPlan.id == current_user.active_plan_id
-        ).first()
-        if plan and prompt.cycle == plan.cycle_number:
-            from app.models.plan import DailyProgress
-            day_prog = (
-                db.query(DailyProgress)
-                .filter(
-                    DailyProgress.plan_id == current_user.active_plan_id,
-                    DailyProgress.day_number == current_user.current_day,
-                )
-                .first()
-            )
-            if day_prog and not day_prog.writing_done:
-                day_prog.writing_done = True
-                day_prog.activities_completed = (
-                    day_prog.activities_completed or 0
-                ) + 1
-                db.commit()
-                from app.services.progress_service import advance_day_if_complete
-                advance_day_if_complete(db, current_user)
+    if prompt.user_id == current_user.id:
+        from app.services.progress_service import mark_activity_complete
+        mark_activity_complete(
+            db, current_user, "writing", prompt.cycle, prompt.day
+        )
 
     return submission
 

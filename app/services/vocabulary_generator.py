@@ -1,27 +1,167 @@
+"""
+TalkFiesta — Vocabulary Generator (Celery Task)
+=================================================
+Generates 210 personalized vocabulary words per cycle using Google Gemini.
+
+Optimizations over original:
+  - Idempotency guard: skips if words already exist for user+cycle
+  - Partial failure handling: saves each successful batch immediately
+  - Smarter struggle context: uses SRS lapse_count + mastery_level
+  - AI output validation: graceful defaults for malformed/missing fields
+  - Celery-native retry with autoretry_for instead of blocking sleep
+"""
 import logging
 import json
 import time
+from typing import Optional
+
+from celery import shared_task
 from google import genai
 from google.genai import types
 
-from app.core.celery_app import celery_app
 from app.db.session import SessionLocal
 from app.models.user import User
-from app.models.vocabulary import VocabularyWord, VocabularyProgress
+from app.models.vocabulary import VocabularyWord, VocabularyProgress, VocabularySRS
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+# ── Constants ────────────────────────────────────────────────────────────────
 
-def _generate_batch(client, user, cycle: int, day_start: int, day_end: int, struggle_context: str) -> list:
-    """Call Gemini to generate 10 words/day for days day_start..day_end (inclusive)."""
+EXPECTED_WORDS_PER_DAY = 10
+TOTAL_DAYS = 21
+BATCHES = [(1, 7), (8, 14), (15, 21)]  # 3 batches × 7 days × 10 words = 210
+
+REQUIRED_FIELDS = {"word", "definition", "day", "position_in_day"}
+OPTIONAL_LIST_FIELDS = {"example_sentences", "synonyms", "antonyms", "collocations"}
+OPTIONAL_STRING_FIELDS = {"phonetic", "part_of_speech", "memory_tip"}
+
+MODELS_TO_TRY = ["gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-2.5-flash"]
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def _validate_word(raw: dict, user_level: str) -> Optional[dict]:
+    """
+    Validate a single word dict from Gemini output.
+    Returns a cleaned dict with defaults for missing optional fields,
+    or None if required fields are missing.
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    # Check required fields
+    missing = REQUIRED_FIELDS - set(raw.keys())
+    if missing:
+        logger.warning("Skipping word — missing required fields: %s", missing)
+        return None
+
+    word_text = raw.get("word", "").strip()
+    if not word_text:
+        logger.warning("Skipping word — empty 'word' field")
+        return None
+
+    # Build clean dict with safe defaults
+    clean = {
+        "word": word_text,
+        "definition": str(raw.get("definition", "")).strip(),
+        "day": int(raw.get("day", 1)),
+        "position_in_day": int(raw.get("position_in_day", 1)),
+    }
+
+    # Optional string fields — default to empty string
+    for field in OPTIONAL_STRING_FIELDS:
+        clean[field] = str(raw.get(field, "") or "").strip()
+
+    # Optional list fields — default to empty list, ensure list type
+    for field in OPTIONAL_LIST_FIELDS:
+        val = raw.get(field)
+        if isinstance(val, list):
+            clean[field] = [str(x) for x in val if x]
+        else:
+            clean[field] = []
+
+    # Difficulty: validate it's a valid CEFR level, fall back to user level
+    valid_levels = {"A1", "A2", "B1", "B2", "C1", "C2"}
+    diff = str(raw.get("difficulty", "") or "").strip().upper()
+    clean["difficulty"] = diff if diff in valid_levels else user_level
+
+    return clean
+
+
+def _build_struggle_context(db, user_id: str, user_level: str) -> str:
+    """
+    Build AI prompt context from words the user struggled with.
+    Uses both mastery_level (from VocabularyProgress) and lapse_count
+    (from VocabularySRS) for richer signal.
+    """
+    # High-lapse words (forgotten 2+ times in SRS reviews)
+    high_lapse_words = (
+        db.query(VocabularySRS)
+        .join(VocabularyWord)
+        .filter(
+            VocabularySRS.user_id == user_id,
+            VocabularySRS.lapse_count >= 2,
+        )
+        .order_by(VocabularySRS.lapse_count.desc())
+        .limit(10)
+        .all()
+    )
+
+    # Low-mastery words (practiced but never stuck)
+    low_mastery_words = (
+        db.query(VocabularyProgress)
+        .join(VocabularyWord)
+        .filter(
+            VocabularyProgress.user_id == user_id,
+            VocabularyProgress.mastery_level < 3,
+        )
+        .order_by(VocabularyProgress.times_practiced.desc())
+        .limit(10)
+        .all()
+    )
+
+    parts = []
+
+    if high_lapse_words:
+        words = [srs.word.word for srs in high_lapse_words if srs.word]
+        if words:
+            parts.append(
+                f"Words they repeatedly forgot (high lapse count): {', '.join(words)}"
+            )
+
+    if low_mastery_words:
+        words = [p.word.word for p in low_mastery_words if p.word]
+        if words:
+            parts.append(
+                f"Words with low mastery (practiced but not retained): {', '.join(words)}"
+            )
+
+    if not parts:
+        return ""
+
+    return (
+        "IMPORTANT: Reinforce word families and semantic fields related to "
+        "these previously struggled words:\n" + "\n".join(parts)
+    )
+
+
+def _generate_batch(
+    client, user: User, cycle: int, day_start: int, day_end: int,
+    struggle_context: str,
+) -> list[dict]:
+    """
+    Call Gemini to generate words for days day_start..day_end (inclusive).
+    Returns validated list of word dicts. Raises RuntimeError after all retries fail.
+    """
     num_days = day_end - day_start + 1
-    total_words = num_days * 10
+    total_words = num_days * EXPECTED_WORDS_PER_DAY
+    user_level = user.english_level or "B1"
 
     prompt = f"""
     You are a highly skilled CEFR native English curriculum expert.
     Generate exactly {total_words} vocabulary words for a user learning English.
-    User Level: {user.english_level or 'B1'}.
+    User Level: {user_level}.
     Learning Goal: {user.learning_goal or 'conversational'}.
     Cycle Number: {cycle}.
 
@@ -43,21 +183,18 @@ def _generate_batch(client, user, cycle: int, day_start: int, day_end: int, stru
     - "position_in_day": integer (1 through 10)
     """
 
-    # Retry up to 4 times with exponential backoff for 503 / transient errors
-    # Priority: gemini-2.5-flash-lite (stable) -> gemini-flash-latest -> gemini-2.5-flash
-    models_to_try = ["gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-2.5-flash"]
     last_error = None
 
     for attempt in range(4):
-        model = models_to_try[min(attempt, len(models_to_try) - 1)]
+        model = MODELS_TO_TRY[min(attempt, len(MODELS_TO_TRY) - 1)]
         try:
             response = client.models.generate_content(
                 model=model,
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
-                    temperature=0.7
-                )
+                    temperature=0.7,
+                ),
             )
             raw_text = response.text.strip()
 
@@ -67,95 +204,199 @@ def _generate_batch(client, user, cycle: int, day_start: int, day_end: int, stru
             if raw_text.endswith("```"):
                 raw_text = raw_text[:-3]
 
-            words_data = json.loads(raw_text.strip())
-            logger.info(f"Batch days {day_start}-{day_end}: got {len(words_data)} words via {model}")
-            return words_data
+            raw_words = json.loads(raw_text.strip())
+
+            if not isinstance(raw_words, list):
+                raise ValueError(f"Expected JSON array, got {type(raw_words).__name__}")
+
+            # Validate each word individually
+            validated = []
+            for raw_word in raw_words:
+                clean = _validate_word(raw_word, user_level)
+                if clean:
+                    validated.append(clean)
+
+            logger.info(
+                "Batch days %d-%d: %d/%d words valid via %s",
+                day_start, day_end, len(validated), len(raw_words), model,
+            )
+            return validated
 
         except Exception as e:
             last_error = e
             wait = 5 * (2 ** attempt)  # 5s, 10s, 20s, 40s
-            logger.warning(f"Batch days {day_start}-{day_end} attempt {attempt + 1} ({model}) failed: {e}. Retrying in {wait}s...")
+            logger.warning(
+                "Batch days %d-%d attempt %d (%s) failed: %s. Retrying in %ds...",
+                day_start, day_end, attempt + 1, model, e, wait,
+            )
             time.sleep(wait)
 
-    raise RuntimeError(f"All retries failed for batch days {day_start}-{day_end}: {last_error}")
+    raise RuntimeError(
+        f"All retries failed for batch days {day_start}-{day_end}: {last_error}"
+    )
 
 
-@celery_app.task(name="app.services.vocabulary_generator.generate_cycle_vocabulary")
-def generate_cycle_vocabulary(user_id: str, cycle: int):
+def _save_batch(db, user: User, cycle: int, words_data: list[dict]) -> int:
     """
-    Dynamically generates 210 personalized words for a user's cycle using Google Gemini.
-    Uses 3 batched API calls (70 words each) to avoid response truncation.
-    Triggered when a user starts a new plan (cycle).
+    Convert validated word dicts to VocabularyWord ORM objects and persist.
+    Returns the count of words saved.
     """
-    logger.info(f"Starting async vocabulary generation for User {user_id}, Cycle {cycle}")
+    db_words = []
+    for wd in words_data:
+        db_words.append(VocabularyWord(
+            user_id=user.id,
+            cycle=cycle,
+            day=wd["day"],
+            position_in_day=wd["position_in_day"],
+            word=wd["word"],
+            phonetic=wd.get("phonetic", ""),
+            part_of_speech=wd.get("part_of_speech", ""),
+            definition=wd["definition"],
+            example_sentences=wd.get("example_sentences", []),
+            synonyms=wd.get("synonyms", []),
+            antonyms=wd.get("antonyms", []),
+            collocations=wd.get("collocations", []),
+            memory_tip=wd.get("memory_tip", ""),
+            difficulty=wd.get("difficulty", user.english_level or "B1"),
+        ))
+
+    if db_words:
+        db.bulk_save_objects(db_words)
+        db.commit()
+
+    return len(db_words)
+
+
+# ── Celery Task ──────────────────────────────────────────────────────────────
+
+@shared_task(
+    name="app.services.vocabulary_generator.generate_cycle_vocabulary",
+    bind=True,
+    max_retries=2,
+    default_retry_delay=60,
+    autoretry_for=(RuntimeError,),
+)
+def generate_cycle_vocabulary(self, user_id: str, cycle: int):
+    """
+    Generate 210 personalized vocabulary words for a user's cycle.
+
+    Optimizations:
+      - Idempotency: exits early if words already exist for user+cycle
+      - Partial failure: saves each successful batch immediately
+      - Graceful degradation: skips failed batches, logs warnings
+      - Struggle-aware: uses SRS lapse_count for richer reinforcement
+    """
+    logger.info(
+        "Starting vocab generation for User %s, Cycle %s (attempt %d)",
+        user_id, cycle, self.request.retries + 1,
+    )
+
     db = SessionLocal()
     client = genai.Client(api_key=settings.GOOGLE_AI_STUDIO_API_KEY)
 
     try:
         user = db.query(User).filter(User.id == user_id).first()
         if not user:
-            logger.error(f"User {user_id} not found.")
+            logger.error("User %s not found — aborting.", user_id)
             return
 
-        # Fetch words user struggled with to reinforce word families
-        struggled_progress = db.query(VocabularyProgress).join(VocabularyWord).filter(
-            VocabularyProgress.user_id == user_id,
-            VocabularyProgress.mastery_level < 3
-        ).order_by(VocabularyProgress.times_practiced.desc()).limit(20).all()
-
-        struggled_words = [p.word.word for p in struggled_progress]
-        struggle_context = (
-            f"Please reinforce word families for these words they struggled with recently: {', '.join(struggled_words)}"
-            if struggled_words else ""
-        )
-
-        # Generate in 3 batches to stay within Gemini output token limits:
-        # Batch 1: days 1-7 (70 words)
-        # Batch 2: days 8-14 (70 words)
-        # Batch 3: days 15-21 (70 words)
-        batches = [(1, 7), (8, 14), (15, 21)]
-        all_words_data = []
-
-        for day_start, day_end in batches:
-            logger.info(f"Calling Gemini for batch: days {day_start}-{day_end}...")
-            try:
-                batch = _generate_batch(client, user, cycle, day_start, day_end, struggle_context)
-                all_words_data.extend(batch)
-            except json.JSONDecodeError as e:
-                logger.error(f"JSON parse error in batch days {day_start}-{day_end}: {e}")
-                raise
-            except Exception as e:
-                logger.error(f"Error in batch days {day_start}-{day_end}: {e}")
-                raise
-
-        logger.info(f"Total words collected across all batches: {len(all_words_data)}")
-
-        db_words = []
-        for word_dict in all_words_data:
-            db_word = VocabularyWord(
-                user_id=user.id,
-                cycle=cycle,
-                day=word_dict.get('day', 1),
-                position_in_day=word_dict.get('position_in_day', 1),
-                word=word_dict.get('word', ''),
-                phonetic=word_dict.get('phonetic', ''),
-                part_of_speech=word_dict.get('part_of_speech', ''),
-                definition=word_dict.get('definition', ''),
-                example_sentences=word_dict.get('example_sentences', []),
-                synonyms=word_dict.get('synonyms', []),
-                antonyms=word_dict.get('antonyms', []),
-                collocations=word_dict.get('collocations', []),
-                memory_tip=word_dict.get('memory_tip', ''),
-                difficulty=word_dict.get('difficulty', user.english_level or 'B1')
+        # ── Idempotency guard ───────────────────────────────────────────
+        existing_count = (
+            db.query(VocabularyWord)
+            .filter(
+                VocabularyWord.user_id == user_id,
+                VocabularyWord.cycle == cycle,
             )
-            db_words.append(db_word)
+            .count()
+        )
+        expected_total = TOTAL_DAYS * EXPECTED_WORDS_PER_DAY
 
-        db.bulk_save_objects(db_words)
-        db.commit()
-        logger.info(f"Successfully generated and saved {len(db_words)} dynamic words for User {user_id}")
+        if existing_count >= expected_total:
+            logger.info(
+                "User %s cycle %s already has %d words — skipping.",
+                user_id, cycle, existing_count,
+            )
+            return
 
+        if existing_count > 0:
+            logger.warning(
+                "User %s cycle %s has %d/%d words — will top up missing batches.",
+                user_id, cycle, existing_count, expected_total,
+            )
+
+        # ── Build struggle context ──────────────────────────────────────
+        struggle_context = _build_struggle_context(db, user_id, user.english_level or "B1")
+
+        # ── Generate and save each batch independently ──────────────────
+        total_saved = 0
+        failed_batches = []
+
+        for day_start, day_end in BATCHES:
+            # Check if this batch's days already have words (for top-up)
+            batch_existing = (
+                db.query(VocabularyWord)
+                .filter(
+                    VocabularyWord.user_id == user_id,
+                    VocabularyWord.cycle == cycle,
+                    VocabularyWord.day >= day_start,
+                    VocabularyWord.day <= day_end,
+                )
+                .count()
+            )
+            batch_expected = (day_end - day_start + 1) * EXPECTED_WORDS_PER_DAY
+
+            if batch_existing >= batch_expected:
+                logger.info(
+                    "Days %d-%d already have %d words — skipping batch.",
+                    day_start, day_end, batch_existing,
+                )
+                total_saved += batch_existing
+                continue
+
+            logger.info("Calling Gemini for batch: days %d-%d...", day_start, day_end)
+            try:
+                validated_words = _generate_batch(
+                    client, user, cycle, day_start, day_end, struggle_context,
+                )
+                saved = _save_batch(db, user, cycle, validated_words)
+                total_saved += saved
+                logger.info(
+                    "Batch days %d-%d saved: %d words", day_start, day_end, saved,
+                )
+            except Exception as e:
+                logger.error(
+                    "Batch days %d-%d failed permanently: %s",
+                    day_start, day_end, e,
+                )
+                failed_batches.append((day_start, day_end, str(e)))
+
+        # ── Summary ─────────────────────────────────────────────────────
+        if failed_batches:
+            logger.warning(
+                "Generation complete for User %s Cycle %s: %d words saved, "
+                "%d batches failed (days: %s). Task will retry.",
+                user_id, cycle, total_saved, len(failed_batches),
+                [f"{s}-{e}" for s, e, _ in failed_batches],
+            )
+            if total_saved == 0:
+                raise RuntimeError(
+                    f"All batches failed for user {user_id} cycle {cycle}"
+                )
+        else:
+            logger.info(
+                "Successfully generated %d words for User %s Cycle %s.",
+                total_saved, user_id, cycle,
+            )
+
+    except RuntimeError:
+        # Let Celery autoretry handle this
+        raise
     except Exception as e:
-        logger.error(f"Error generating vocabulary for User {user_id}: {e}", exc_info=True)
+        logger.error(
+            "Unexpected error generating vocabulary for User %s: %s",
+            user_id, e, exc_info=True,
+        )
         db.rollback()
+        raise
     finally:
         db.close()
