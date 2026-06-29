@@ -1,7 +1,31 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.errors import RateLimitExceeded
 from app.config import settings
+from app.core.rate_limiter import limiter
 from app.api import auth, profile, plans, speaking, conversation, vocabulary, writing, progress, achievements, cycles, dashboard, billing, webhooks
+
+def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
+    """
+    Custom exception handler for RateLimitExceeded exceptions, conforming to RFC 7807.
+    """
+    response_body = {
+        "type": "https://talkfiesta.com/errors/rate-limit-exceeded",
+        "title": "Rate Limit Exceeded",
+        "status": 429,
+        "detail": f"Rate limit exceeded: {exc.detail}. Please try again later.",
+        "instance": request.url.path,
+    }
+    headers = {}
+    if hasattr(exc, "retry_after") and exc.retry_after:
+        headers["Retry-After"] = str(exc.retry_after)
+    return JSONResponse(
+        status_code=429,
+        content=response_body,
+        headers=headers
+    )
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -9,6 +33,11 @@ app = FastAPI(
     version=settings.VERSION,
 )
 
+# Attach limiter to app state and register custom handler
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+
+app.add_middleware(SlowAPIMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,

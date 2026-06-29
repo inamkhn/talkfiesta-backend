@@ -1,11 +1,13 @@
 import logging
 from typing import List
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, status, Request
 from sqlalchemy.orm import Session
+from app.core.rate_limiter import limiter
 
 from app.db.session import get_db
 from app.core.dependencies import get_current_user
 from app.models.user import User
+from app.models.writing import WritingPrompt
 
 from app.schemas.writing import (
     WritingPromptResponse,
@@ -88,7 +90,9 @@ def get_prompt_by_id(
     return writing_service.get_prompt_by_id(db, prompt_id)
 
 @router.post("/submissions", response_model=WritingSubmissionResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit("10/minute")
 def create_submission(
+    request: Request,
     payload: WritingSubmitRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -100,7 +104,9 @@ def create_submission(
     return writing_service.grade_and_save_submission(db, current_user, payload)
 
 @router.patch("/submissions/{submission_id}", response_model=WritingSubmissionResponse)
+@limiter.limit("10/minute")
 def revise_submission(
+    request: Request,
     submission_id: str,
     payload: WritingSubmitRequest,
     current_user: User = Depends(get_current_user),

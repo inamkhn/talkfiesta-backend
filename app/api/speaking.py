@@ -3,10 +3,12 @@ import asyncio
 import json
 import uuid
 from pathlib import Path
-from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, status
+from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, status, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from typing import List
+
+from app.core.rate_limiter import limiter
 
 from app.db.session import get_db, SessionLocal
 from app.core.dependencies import get_current_user
@@ -101,7 +103,9 @@ def get_exercise_by_id(
 
 
 @router.get("/upload-url", response_model=PresignedUrlResponse)
+@limiter.limit("10/minute")
 def get_upload_url(
+    request: Request,
     content_type: str = "audio/webm",
     current_user: User = Depends(get_current_user)
 ):
@@ -111,7 +115,9 @@ def get_upload_url(
     return generate_presigned_upload_url(filename, content_type)
 
 @router.post("/submissions", status_code=status.HTTP_202_ACCEPTED)
+@limiter.limit("10/minute")
 async def create_submission(
+    request: Request,
     payload: SpeakingSubmissionCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)

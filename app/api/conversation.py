@@ -3,9 +3,11 @@ import asyncio
 import base64
 from datetime import datetime
 from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Request
 from sqlalchemy.orm import Session
+from app.core.rate_limiter import limiter
 from google import genai
+# pyrefly: ignore [missing-import]
 from google.genai import types
 
 from app.config import settings
@@ -51,7 +53,9 @@ def get_scenarios():
 
 # --- SESSION INITIALIZATION ---
 @router.post("/sessions", response_model=ConversationSessionResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit("10/minute")
 def create_session(
+    request: Request,
     payload: ConversationSessionCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -249,7 +253,9 @@ async def conversation_websocket_proxy(
 
 # --- SESSION COMPLETION (SYNC) ---
 @router.post("/sessions/{session_id}/sync")
+@limiter.limit("10/minute")
 def sync_session_messages(
+    request: Request,
     session_id: str,
     payload: ConversationSyncPayload,
     current_user: User = Depends(get_current_user),

@@ -1,9 +1,10 @@
 import logging
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, status, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.core.dependencies import get_current_user
+from app.core.rate_limiter import limiter
 from app.models.user import User
 from app.schemas.auth import (
     RegisterRequest, RegisterResponse,
@@ -24,7 +25,8 @@ logger = logging.getLogger(__name__)
 
 
 @router.post("/register", response_model=RegisterResponse, status_code=status.HTTP_201_CREATED)
-def register(data: RegisterRequest, db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+def register(request: Request, data: RegisterRequest, db: Session = Depends(get_db)):
     """Register a new user account."""
     user = register_user(db, data)
     return RegisterResponse(
@@ -34,13 +36,16 @@ def register(data: RegisterRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/login", response_model=TokenResponse)
-def login(data: LoginRequest, db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+def login(request: Request, data: LoginRequest, db: Session = Depends(get_db)):
     """Login with email and password (JSON). Returns access + refresh tokens."""
     return login_user(db, data)
 
 
 @router.post("/login/form", response_model=TokenResponse, include_in_schema=False)
+@limiter.limit("5/minute")
 def login_form(
+    request: Request,
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db),
 ):
@@ -50,7 +55,8 @@ def login_form(
 
 
 @router.post("/refresh", response_model=TokenResponse)
-def refresh(data: RefreshRequest, db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+def refresh(request: Request, data: RefreshRequest, db: Session = Depends(get_db)):
     """Get a new access + refresh token pair using a valid refresh token."""
     return refresh_tokens(db, data.refresh_token)
 
@@ -84,7 +90,8 @@ def change_pwd(
 
 
 @router.post("/forgot-password", status_code=status.HTTP_200_OK)
-def forgot_pwd(data: ForgotPasswordRequest, db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+def forgot_pwd(request: Request, data: ForgotPasswordRequest, db: Session = Depends(get_db)):
     """
     Request a password reset email.
     Always returns 200 — never reveals whether the email exists.
@@ -94,21 +101,25 @@ def forgot_pwd(data: ForgotPasswordRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/reset-password", status_code=status.HTTP_200_OK)
-def reset_pwd(data: ResetPasswordRequest, db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+def reset_pwd(request: Request, data: ResetPasswordRequest, db: Session = Depends(get_db)):
     """Reset password using the token received by email."""
     reset_password(db, data.token, data.new_password)
     return {"message": "Password reset successfully. You can now log in."}
 
 
 @router.post("/verify-email", status_code=status.HTTP_200_OK)
-def verify_email_endpoint(data: VerifyEmailRequest, db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+def verify_email_endpoint(request: Request, data: VerifyEmailRequest, db: Session = Depends(get_db)):
     """Verify email address using the token received by email (JSON body)."""
     verify_email(db, data.token)
     return {"message": "Email verified successfully."}
 
 
 @router.get("/verify-email", status_code=status.HTTP_200_OK)
+@limiter.limit("5/minute")
 def verify_email_via_query(
+    request: Request,
     token: str = Query(..., description="Token from the verification email link"),
     db: Session = Depends(get_db),
 ):
@@ -118,7 +129,8 @@ def verify_email_via_query(
 
 
 @router.post("/resend-verification", status_code=status.HTTP_200_OK)
-def resend_verification_endpoint(data: ResendVerificationRequest, db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+def resend_verification_endpoint(request: Request, data: ResendVerificationRequest, db: Session = Depends(get_db)):
     """
     Resend the email verification link.
     Always returns 200 — never reveals whether the email exists.

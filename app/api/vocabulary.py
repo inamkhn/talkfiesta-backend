@@ -10,8 +10,9 @@ Existing endpoints are backward compatible. New endpoints:
 import logging
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
+from app.core.rate_limiter import limiter
 
 from app.db.session import get_db
 from app.core.dependencies import get_current_user
@@ -81,7 +82,9 @@ def get_word_by_id(
 # ── PRACTICE (NEW LEARNING) ─────────────────────────────────────────────────
 
 @router.get("/practice", response_model=ModuleContentResponse[VocabularyWordResponse])
+@limiter.limit("10/minute")
 def get_todays_new_words(
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -96,7 +99,9 @@ def get_todays_new_words(
 
 
 @router.post("/practice")
+@limiter.limit("10/minute")
 def submit_practice(
+    request: Request,
     payload: VocabularyPracticeSubmit,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -119,7 +124,9 @@ def get_due_srs_reviews(
 
 
 @router.post("/review")
+@limiter.limit("10/minute")
 def submit_srs_review(
+    request: Request,
     payload: VocabularyReviewSubmit,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -130,7 +137,9 @@ def submit_srs_review(
 
 
 @router.post("/review/batch", response_model=BatchReviewResponse)
+@limiter.limit("10/minute")
 def submit_batch_review(
+    request: Request,
     payload: BatchReviewRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
