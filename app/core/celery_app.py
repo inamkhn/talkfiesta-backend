@@ -1,5 +1,6 @@
 from celery import Celery
 from app.config import settings
+from app.core import celery_tracing
 
 celery_app = Celery(
     "talkfiesta_tasks",

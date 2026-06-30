@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: List[str] = ["http://localhost:3000", "https://talkfiesta.com"]
 
+    # Allowed hosts for TrustedHostMiddleware
+    ALLOWED_HOSTS: List[str] = ["localhost", "127.0.0.1", "talkfiesta.com", "*.talkfiesta.com", "testserver"]
+
     # Frontend (used in email links)
     FRONTEND_URL: str = "http://localhost:3000"
 
